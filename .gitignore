@@ -1,0 +1,19 @@
+# Secrets only
+service_account.json
+.streamlit/secrets.toml
+
+# Python cache
+__pycache__/
+*.py[cod]
+.Python
+
+# Virtual environments
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
