@@ -11,7 +11,7 @@ from src.feature_engineer import engineer_features, get_features_list
 from src.model_trainer import train_model
 
 
-def run_r_aggregation(prop_name, seasons=range(2006, 2026), max_week_2025=5):
+def run_r_aggregation(prop_name, seasons=range(2006, 2026), max_week_2025=6):
     """
     Run R data aggregation for a prop, limiting 2025 to max_week_2025
     """
