@@ -186,7 +186,7 @@ def save_to_excel(df, week):
         ws = wb.create_sheet(sheet_name)
         start_row = 2
         
-        headers = ['Player', 'Team', 'Opponent', 'Home/Away', 'Mean Pred', 'Vegas.Line', 'Actual', 'Prob Over', 'Lean', 'Win.Loss', 'P10', 'P50', 'P90']
+        headers = ['Player', 'Team', 'Opponent', 'Home/Away', 'Mean.Pred', 'Vegas.Line', 'Actual', 'Prob.Over', 'Lean', 'Win.Loss', 'P10', 'P50', 'P90']
         for col_idx, header in enumerate(headers, 1):
             ws.cell(row=1, column=col_idx, value=header)
         
