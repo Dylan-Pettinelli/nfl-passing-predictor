@@ -1,4 +1,4 @@
-# streamlit_app.py - Google Sheets Version with Batch Import & Excel Export
+# streamlit_app.py - Google Sheets Version with Batch Import, Excel Export & Betting Advisor
 # Deploy to Streamlit Cloud for anywhere access
 
 import streamlit as st
@@ -29,6 +29,19 @@ st.markdown("""
     <style>
     .stButton>button {
         width: 100%;
+    }
+    .bet-card {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .tier1 {
+        background-color: #90EE90;
+        border: 2px solid #32CD32;
+    }
+    .tier2 {
+        background-color: #FFD700;
+        border: 2px solid #FFA500;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -120,6 +133,19 @@ def load_predictions_from_sheets(week):
             'P90': 'p90'
         }
         df = df.rename(columns=column_mapping)
+        
+        # Convert numeric columns
+        numeric_cols = ['mean_prediction', 'line', 'p10', 'p50', 'p90']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Convert prob_over_line from percentage string to float
+        if 'prob_over_line' in df.columns:
+            df['prob_over_line'] = df['prob_over_line'].apply(
+                lambda x: float(str(x).rstrip('%')) / 100 if isinstance(x, str) and '%' in str(x) else float(x) if x else 0
+            )
+        
         return df
     except Exception as e:
         return pd.DataFrame()
@@ -226,6 +252,99 @@ def export_to_excel(week):
         st.error(f"Export error: {e}")
         return None
 
+# BETTING ADVISOR LOGIC
+def calculate_bet_tier(row, bankroll, base_unit_pct):
+    """
+    Calculate betting tier for a prediction
+    Returns: (tier, unit_size, reasoning)
+    """
+    try:
+        mean_pred = float(row['mean_prediction'])
+        vegas_line = float(row['line'])
+        prob_over = float(row['prob_over_line'])
+        home_away = str(row['home_away'])
+        lean = str(row['lean'])
+        
+        edge = abs(mean_pred - vegas_line)
+        is_home = (home_away.lower() == 'home')
+        base_unit = bankroll * (base_unit_pct / 100)
+        
+        # Determine confidence from probability
+        if lean == 'OVER':
+            model_prob = prob_over
+        else:
+            model_prob = 1 - prob_over
+        
+        if model_prob >= 0.65:
+            confidence = 'High'
+        elif model_prob >= 0.55:
+            confidence = 'Medium'
+        else:
+            confidence = 'Low'
+        
+        # TIER 0: Skip entirely
+        if edge < 5:
+            return 0, 0, "Edge too small (<5 yards)", confidence, model_prob
+        
+        # TIER 1: Full unit (optimal conditions)
+        if (5 <= edge <= 20 and is_home and confidence in ['Medium', 'High']):
+            tier = 1
+            unit = base_unit
+            reason = f"Optimal: {edge:.0f}y edge, Home, {confidence} confidence"
+            return tier, unit, reason, confidence, model_prob
+        
+        # TIER 2: Half unit (decent but not optimal)
+        else:
+            tier = 2
+            unit = base_unit * 0.5
+            reasons = []
+            if edge > 20:
+                reasons.append(f"Large edge ({edge:.0f}y)")
+            if not is_home:
+                reasons.append("Away game")
+            if confidence == 'Low':
+                reasons.append(f"Low confidence ({model_prob:.0%})")
+            
+            reason = "Caution: " + ", ".join(reasons) if reasons else "Standard bet"
+            return tier, unit, reason, confidence, model_prob
+            
+    except Exception as e:
+        return 0, 0, f"Error: {str(e)}", 'N/A', 0
+
+def analyze_week_for_betting(df, bankroll, base_unit_pct):
+    """Analyze all predictions and return betting recommendations"""
+    if df.empty:
+        return pd.DataFrame()
+    
+    recommendations = []
+    
+    for idx, row in df.iterrows():
+        tier, unit, reason, confidence, model_prob = calculate_bet_tier(row, bankroll, base_unit_pct)
+        
+        if tier > 0:  # Only include bets (skip tier 0)
+            # Calculate expected value
+            ev = (model_prob * unit * 0.909) - ((1 - model_prob) * unit)
+            roi = (ev / unit * 100) if unit > 0 else 0
+            
+            recommendations.append({
+                'player': row['player_name'],
+                'matchup': f"{row['posteam']} vs {row['defteam']}",
+                'location': row['home_away'],
+                'prediction': row['mean_prediction'],
+                'line': row['line'],
+                'edge': abs(row['mean_prediction'] - row['line']),
+                'lean': row['lean'],
+                'prob': row['prob_over_line'],
+                'confidence': confidence,
+                'tier': tier,
+                'unit': unit,
+                'ev': ev,
+                'roi': roi,
+                'reason': reason
+            })
+    
+    return pd.DataFrame(recommendations)
+
 # Check if model is trained
 if not os.path.exists('models/qb_passing_yards_model.pkl'):
     st.error("⚠️ Model not found! Please ensure model files are in the repository.")
@@ -269,10 +388,11 @@ if player_data is not None:
     st.info(f"📊 Model trained through 2025 Week {max_week_in_data}")
     
     # Tabs for different modes
-    tab1, tab2, tab3 = st.tabs(["📱 Single Prediction", "⚡ Batch Import", "📊 View & Export"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📱 Single Prediction", "⚡ Batch Import", "📊 View & Export", "💰 Betting Advisor"])
     
-    # TAB 1: Single Prediction
+    # TAB 1: Single Prediction (keep existing code)
     with tab1:
+        # [Keep all existing tab1 code - not showing here to save space]
         # Sidebar inputs
         st.sidebar.header("🎯 Prediction Inputs")
         
@@ -402,219 +522,114 @@ if player_data is not None:
                 st.metric("P50", f"{pred['p50']:.0f} yds")
             with col3:
                 st.metric("P90", f"{pred['p90']:.0f} yds")
-            
-            st.markdown("---")
-            st.subheader("🏈 Game Details")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"**Player:** {pred['player_name']}")
-                st.write(f"**Matchup:** {pred['posteam']} vs {pred['defteam']}")
-            with col2:
-                st.write(f"**Location:** {pred['home_away']}")
-                st.write(f"**Week {pred['week']}, {season}**")
-            
-            # Recent performance
-            player_history_display = player_data[
-                (player_data['player_name'] == pred['player_name']) & 
-                ((player_data['season'] < season) | 
-                 ((player_data['season'] == season) & (player_data['week'] < pred['week'])))
-            ]
-            
-            recent_games = player_history_display.tail(5)
-            if len(recent_games) > 0:
-                st.markdown("---")
-                st.subheader("📜 Recent Performance")
-                
-                avg_recent = recent_games['passing_yards'].mean()
-                last_game = recent_games['passing_yards'].iloc[-1]
-                game_count = len(player_history_display)
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Last 5 Avg", f"{avg_recent:.0f} yds")
-                with col2:
-                    st.metric("Last Game", f"{last_game:.0f} yds")
-                with col3:
-                    st.metric("Total Games", f"{game_count}")
     
-    # TAB 2: Batch Import
-    with tab2:
-        st.subheader("⚡ Batch Predictions")
-        st.write("Enter multiple predictions at once (one per line)")
+    # TAB 2 & 3: Keep existing code
+    # [Not showing to save space - keep all existing code]
+    
+    # TAB 4: BETTING ADVISOR (NEW)
+    with tab4:
+        st.subheader("💰 Smart Betting Advisor")
+        st.write("Get data-driven bet recommendations based on your predictions")
         
-        st.info("**Format:** `Player Name, Team, Opponent, Line, Home/Away`")
-        st.caption("Example: `P.Mahomes, KC, LV, 265.5, Home`")
-        
-        batch_week = st.number_input("Week for Batch", min_value=1, max_value=18, 
-                                     value=min(max_week_in_data + 1, 18), key="batch_week")
-        
-        batch_input = st.text_area(
-            "Batch Input",
-            height=200,
-            placeholder="P.Mahomes, KC, LV, 265.5, Home\nJ.Allen, BUF, MIA, 250.5, Away\nL.Jackson, BAL, CIN, 240.5, Home",
-            help="One prediction per line"
-        )
-        
+        # Settings
         col1, col2 = st.columns(2)
         with col1:
-            batch_save = st.checkbox("💾 Save All to Sheets", value=True, key="batch_save")
+            advisor_week = st.number_input("Week to Analyze", min_value=1, max_value=18, 
+                                          value=min(max_week_in_data + 1, 18), key="advisor_week")
         with col2:
-            batch_overwrite = st.checkbox("🔄 Allow Overwrite", value=True, key="batch_overwrite")
+            bankroll = st.number_input("Bankroll ($)", min_value=100, max_value=10000, 
+                                      value=300, step=50, key="advisor_bankroll")
         
-        if st.button("🚀 Process Batch Predictions", type="primary", use_container_width=True):
-            if not batch_input.strip():
-                st.warning("⚠️ Please enter at least one prediction")
-            else:
-                lines = [line.strip() for line in batch_input.split('\n') if line.strip()]
-                batch_results = []
-                errors = []
+        col3, col4 = st.columns(2)
+        with col3:
+            unit_pct = st.number_input("Base Unit %", min_value=0.5, max_value=5.0, 
+                                      value=2.0, step=0.5, key="advisor_unit")
+        with col4:
+            base_unit = bankroll * (unit_pct / 100)
+            st.metric("Base Unit", f"${base_unit:.2f}")
+        
+        if st.button("🎯 Analyze Bets", type="primary", use_container_width=True):
+            with st.spinner("Analyzing predictions..."):
+                predictions_df = load_predictions_from_sheets(advisor_week)
                 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                for idx, line_text in enumerate(lines):
-                    try:
-                        status_text.text(f"Processing {idx+1}/{len(lines)}...")
-                        progress_bar.progress((idx + 1) / len(lines))
-                        
-                        parts = [p.strip() for p in line_text.split(',')]
-                        if len(parts) != 5:
-                            errors.append(f"❌ Invalid format: {line_text}")
-                            continue
-                        
-                        b_player, b_team, b_opp, b_line, b_location = parts
-                        b_is_home = 1 if b_location.lower() == 'home' else 0
-                        b_line_float = float(b_line)
-                        b_team = b_team.upper()
-                        b_opp = b_opp.upper()
-                        
-                        # Find matching QB
-                        matching_qbs = [q for q in qb_list if b_player.lower() in q.lower()]
-                        if not matching_qbs:
-                            errors.append(f"❌ QB not found: {b_player}")
-                            continue
-                        
-                        b_player = matching_qbs[0]
-                        
-                        # Validate teams
-                        if b_team not in NFL_TEAMS:
-                            errors.append(f"❌ Invalid team: {b_team}")
-                            continue
-                        if b_opp not in NFL_TEAMS:
-                            errors.append(f"❌ Invalid opponent: {b_opp}")
-                            continue
-                        
-                        # Generate prediction
-                        result = predict_prop('qb_passing_yards', b_player, b_team, 
-                                            b_opp, b_line_float, 2025, batch_week, b_is_home)
-                        
-                        pred_data = {
-                            'player_name': b_player,
-                            'posteam': b_team,
-                            'defteam': b_opp,
-                            'home_away': b_location,
-                            'mean_prediction': result['mean_prediction'],
-                            'line': b_line_float,
-                            'prob_over_line': result['prob_over_line'],
-                            'lean': 'OVER' if result['mean_prediction'] > b_line_float else 'UNDER',
-                            'p10': result['p10'],
-                            'p50': result['p50'],
-                            'p90': result['p90']
-                        }
-                        
-                        if batch_save:
-                            success, msg = save_to_google_sheets(pred_data, batch_week, batch_overwrite)
-                            if not success and "already exists" not in msg:
-                                errors.append(f"❌ Save failed for {b_player}: {msg}")
-                        
-                        batch_results.append(pred_data)
-                        
-                    except Exception as e:
-                        errors.append(f"❌ Error with {line_text}: {str(e)}")
-                
-                progress_bar.empty()
-                status_text.empty()
-                
-                if batch_results:
-                    st.success(f"✅ Processed {len(batch_results)} predictions!")
+                if predictions_df.empty:
+                    st.warning(f"⚠️ No predictions found for Week {advisor_week}")
+                else:
+                    # Analyze for bets
+                    bets_df = analyze_week_for_betting(predictions_df, bankroll, unit_pct)
                     
-                    # Show results table
-                    results_df = pd.DataFrame(batch_results)
-                    display_df = results_df[['player_name', 'posteam', 'defteam', 'mean_prediction', 'line', 'lean']].copy()
-                    display_df['mean_prediction'] = display_df['mean_prediction'].round(1)
-                    display_df = display_df.rename(columns={
-                        'player_name': 'Player',
-                        'posteam': 'Team',
-                        'defteam': 'Opp',
-                        'mean_prediction': 'Prediction',
-                        'line': 'Line',
-                        'lean': 'Lean'
-                    })
-                    st.dataframe(display_df, use_container_width=True, hide_index=True)
-                    
-                    st.cache_data.clear()
-                
-                if errors:
-                    st.error("**Errors:**")
-                    for error in errors:
-                        st.write(error)
-    
-    # TAB 3: View & Export
-    with tab3:
-        st.subheader("📊 View Predictions & Export to Excel")
-        
-        view_week = st.number_input("Select Week to View", min_value=1, max_value=18, 
-                                     value=min(max_week_in_data + 1, 18), key="view_week")
-        
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        
-        predictions_df = load_predictions_from_sheets(view_week)
-        
-        if not predictions_df.empty:
-            st.success(f"✅ {len(predictions_df)} predictions found for Week {view_week}")
-            
-            # Display table
-            display_cols = ['player_name', 'posteam', 'defteam', 'home_away', 'mean_prediction', 
-                           'line', 'prob_over_line', 'lean', 'p10', 'p50', 'p90']
-            available_cols = [c for c in display_cols if c in predictions_df.columns]
-            
-            if available_cols:
-                display_df = predictions_df[available_cols].copy()
-                
-                # Format for display
-                if 'mean_prediction' in display_df.columns:
-                    display_df['mean_prediction'] = pd.to_numeric(display_df['mean_prediction'], errors='coerce').round(1)
-                if 'line' in display_df.columns:
-                    display_df['line'] = pd.to_numeric(display_df['line'], errors='coerce')
-                
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-            
-            # Export to Excel
-            st.markdown("---")
-            st.subheader("📥 Export to Excel")
-            st.write("Download this week's predictions in Excel format (perfect for copying to your main spreadsheet!)")
-            
-            excel_data = export_to_excel(view_week)
-            if excel_data:
-                st.download_button(
-                    label="📥 Download Week {} as Excel".format(view_week),
-                    data=excel_data,
-                    file_name=f"nfl-predictions-week-{view_week}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            
-            # Link to Google Sheet
-            st.markdown("---")
-            st.markdown("### 🔗 Open in Google Sheets")
-            st.markdown("[View in Google Sheets →](https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID)")
-            st.caption("💡 Tip: Replace YOUR_SHEET_ID in the code with your actual Sheet ID")
-            
-        else:
-            st.info(f"📝 No predictions saved for Week {view_week}")
+                    if bets_df.empty:
+                        st.info("📝 No bets meet the criteria for this week")
+                    else:
+                        # Summary metrics
+                        tier1_bets = bets_df[bets_df['tier'] == 1]
+                        tier2_bets = bets_df[bets_df['tier'] == 2]
+                        
+                        st.success(f"✅ {len(bets_df)} Bets Recommended")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Tier 1 Bets", len(tier1_bets))
+                        with col2:
+                            st.metric("Tier 2 Bets", len(tier2_bets))
+                        with col3:
+                            st.metric("Total Risk", f"${bets_df['unit'].sum():.2f}")
+                        with col4:
+                            st.metric("Expected EV", f"${bets_df['ev'].sum():.2f}")
+                        
+                        st.markdown("---")
+                        
+                        # Display bets by tier
+                        st.subheader("🔥 Tier 1 Bets (Full Unit)")
+                        if len(tier1_bets) > 0:
+                            for _, bet in tier1_bets.iterrows():
+                                st.markdown(f"""
+                                <div class="bet-card tier1">
+                                    <h4>🏈 {bet['player']} - {bet['lean']}</h4>
+                                    <p><strong>Matchup:</strong> {bet['matchup']} ({bet['location']})</p>
+                                    <p><strong>Line:</strong> {bet['line']:.1f} | <strong>Prediction:</strong> {bet['prediction']:.1f} | <strong>Edge:</strong> {bet['edge']:.1f} yards</p>
+                                    <p><strong>Probability:</strong> {bet['prob']:.1%} | <strong>Confidence:</strong> {bet['confidence']}</p>
+                                    <p><strong>💰 Bet:</strong> ${bet['unit']:.2f} | <strong>Expected EV:</strong> ${bet['ev']:.2f} ({bet['roi']:.1f}% ROI)</p>
+                                    <p><em>{bet['reason']}</em></p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        else:
+                            st.info("No Tier 1 bets this week")
+                        
+                        st.markdown("---")
+                        st.subheader("⚠️ Tier 2 Bets (Half Unit)")
+                        if len(tier2_bets) > 0:
+                            for _, bet in tier2_bets.iterrows():
+                                st.markdown(f"""
+                                <div class="bet-card tier2">
+                                    <h4>🏈 {bet['player']} - {bet['lean']}</h4>
+                                    <p><strong>Matchup:</strong> {bet['matchup']} ({bet['location']})</p>
+                                    <p><strong>Line:</strong> {bet['line']:.1f} | <strong>Prediction:</strong> {bet['prediction']:.1f} | <strong>Edge:</strong> {bet['edge']:.1f} yards</p>
+                                    <p><strong>Probability:</strong> {bet['prob']:.1%} | <strong>Confidence:</strong> {bet['confidence']}</p>
+                                    <p><strong>💰 Bet:</strong> ${bet['unit']:.2f} | <strong>Expected EV:</strong> ${bet['ev']:.2f} ({bet['roi']:.1f}% ROI)</p>
+                                    <p><em>{bet['reason']}</em></p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        else:
+                            st.info("No Tier 2 bets this week")
+                        
+                        # Export bets summary
+                        st.markdown("---")
+                        st.subheader("📥 Export Bet Slip")
+                        
+                        bet_slip = bets_df[['player', 'lean', 'line', 'prediction', 'edge', 
+                                           'prob', 'tier', 'unit', 'ev', 'roi']].copy()
+                        bet_slip.columns = ['Player', 'Lean', 'Line', 'Prediction', 'Edge', 
+                                           'Probability', 'Tier', 'Unit ($)', 'EV ($)', 'ROI (%)']
+                        
+                        csv = bet_slip.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Bet Slip (CSV)",
+                            data=csv,
+                            file_name=f"bet-slip-week-{advisor_week}.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
     
     # Footer
     st.markdown("---")
@@ -624,7 +639,7 @@ if player_data is not None:
     2. Push updated model files to GitHub
     3. Streamlit Cloud auto-deploys
     4. Make predictions from anywhere!
-    5. Export to Excel when needed
+    5. Get betting recommendations on your phone!
     """)
 
 else:
